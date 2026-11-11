@@ -1,0 +1,191 @@
+<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Simulador hidrometalúrgico de oro (académico)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root{--bg:#14120f;--p:#201c17;--p2:#2b251e;--t:#ece4d6;--m:#a89c88;--au:#d4a72c;--ok:#4caf7a;--w:#e0a030;--e:#e0554a;--b:#3a3328}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--t);font:14px/1.45 system-ui,sans-serif}
+header{padding:14px 18px;border-bottom:1px solid var(--b)}h1{margin:0;font-size:20px;color:var(--au)}
+.sub{color:var(--m);font-size:12px}
+#flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px 18px}
+.node{background:var(--p2);border:1px solid var(--b);color:var(--t);padding:8px 10px;border-radius:6px;cursor:pointer;font-size:12px}
+.node.on,.node:hover{border-color:var(--au);color:var(--au)}.arr{color:var(--m)}
+main{padding:0 18px 30px}.tab{display:none}.tab.on{display:block}
+.grid{display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:14px}@media(max-width:850px){.grid{grid-template-columns:1fr}}
+.card{background:var(--p);border:1px solid var(--b);border-radius:8px;padding:12px;margin-bottom:12px}
+.card h3{margin:0 0 8px;font-size:14px;color:var(--au)}
+.row{margin-bottom:8px}.row label{display:block;font-size:12px;color:var(--m)}
+.row .c{display:flex;gap:6px;align-items:center}.row input[type=range]{flex:1;accent-color:var(--au)}
+input[type=number],select{background:var(--bg);color:var(--t);border:1px solid var(--b);border-radius:4px;padding:3px;width:84px}select{width:100%}
+button{background:var(--au);color:#111;border:0;border-radius:5px;padding:6px 10px;cursor:pointer;font-weight:600;margin:2px 4px 2px 0}
+button.s{background:var(--p2);color:var(--t);border:1px solid var(--b)}
+.cv{position:relative;height:300px}table{border-collapse:collapse;width:100%;font-size:12px}td,th{border:1px solid var(--b);padding:4px 6px;text-align:left;vertical-align:top}
+.out td:last-child{text-align:right;color:var(--au);font-weight:600}
+.dg{padding:6px 8px;border-left:4px solid;margin:4px 0;background:var(--p2);font-size:12px}.dg.ok{border-color:var(--ok)}.dg.w{border-color:var(--w)}.dg.e{border-color:var(--e)}
+.note{font-size:11px;color:var(--m)}.tag{color:var(--w)}
+</style></head><body>
+<header><h1>⚗ Simulador hidrometalúrgico de oro por cianuración</h1>
+<div class="sub">Herramienta exclusivamente académica. No validada para operación industrial ni guía de manipulación, preparación o dosificación de sustancias peligrosas.</div></header>
+<div id="flow"></div>
+<main id="main"></main>
+<script>
+/* ============ UTILIDADES MATEMÁTICAS (sin DOM) ============ */
+const clamp=(x,a,b)=>Math.min(b,Math.max(a,x)),fmt=(x,d=2)=>isFinite(x)?(+x).toFixed(d):'—';
+// Euler / RK4 para sistemas dy/dt=f(t,y) (Ray & Ray cap.2: forma diferencial dα/dt=k f(α))
+function ode(f,y0,T,n,m){const h=T/n;let y=y0.slice(),t=0;const o=[[0,...y]];
+ for(let i=0;i<n;i++){let k=f(t,y);
+  if(m==='euler')y=y.map((v,j)=>v+h*k[j]);
+  else{const k2=f(t+h/2,y.map((v,j)=>v+h/2*k[j])),k3=f(t+h/2,y.map((v,j)=>v+h/2*k2[j])),k4=f(t+h,y.map((v,j)=>v+h*k3[j]));
+   y=y.map((v,j)=>v+h/6*(k[j]+2*k2[j]+2*k3[j]+k4[j]));}
+  t+=h;o.push([t,...y]);}return o}
+const arrh=(E,T,Tr)=>Math.exp(-E*1000/8.314*(1/(T+273.15)-1/(Tr+273.15)));   // Arrhenius, Ec. 1.6 (cap.1)
+const N=120,curve=(f,T)=>Array.from({length:N+1},(_,i)=>{const t=T*i/N;return{x:t,y:f(t)}});
+const D=(l,m)=>({l,m});
+const chk=(n,v,lo,hi,u)=>v>=lo&&v<=hi?D('ok',`${n} = ${v} ${u}: dentro del rango de referencia (${lo}–${hi}).`):D('w',`${n} = ${v} ${u}: fuera del rango de referencia (${lo}–${hi}).`);
+/* Funciones g(α) de control (cap.3, 4, 2, 5) */
+const G={scm:a=>1-Math.pow(1-a,1/3),                       // Ec. 3.15 control químico / capa límite con tamaño decreciente
+ gb:a=>1-2*a/3-Math.pow(1-a,2/3),                           // Ec. 4.23 Ginstling–Brounshtein
+ jan:a=>Math.pow(1-Math.pow(1-a,1/3),2),                    // Ec. 4.10 Jander
+ fo:a=>-Math.log(1-Math.min(a,1-1e-12))};                   // Ec. 5.12 / 2.16 primer orden
+function ginv(g,v){if(v>=g(1-1e-12)&&g!==G.fo)return 1;let lo=0,hi=1-1e-12;for(let i=0;i<60;i++){const m=(lo+hi)/2;g(m)<v?lo=m:hi=m}return(lo+hi)/2}
+/* ============ MÓDULOS: cada uno con calc(P) puro + diagnóstico ============ */
+const MW={Au:196.97,NaCN:49.01,O2:32,Zn:65.38},RHO_AU=19.3,DCN=1.83e-5,DO2=2.76e-5; // cm²/s (Ec. 5.26, Wadsworth & Wadia 1955)
+const M={};
+M.m1={id:'m1',name:'1. Biooxidación',
+inp:[['T','Temperatura',35,50,.5,42.5,'°C'],['pH','pH',1,2,.05,1.3,''],['O2','O₂ disuelto',0,8,.1,3,'mg/L'],['sol','Sólidos',5,30,1,17,'%'],['tau','Tiempo de residencia',.5,10,.1,5,'días'],
+ ['model','Modelo',['f1|Primer orden  −ln(1−α)=kt (Ec. 2.16)','jm|Johnson–Mehl  [−ln(1−α)]^(1/n)=k′t (Ec. 2.39)']],
+ ['k0','k a 42,5 °C (HIPOTÉTICO)',.05,2,.01,.6,'1/día'],['E','E aparente (HIPOTÉTICO)',0,120,1,50,'kJ/mol'],['nJM','Exponente n Johnson–Mehl (HIPOTÉTICO)',.5,4,.1,2,''],['enc','Au encapsulado en sulfuros (SUPUESTO)',0,100,1,100,'%']],
+calc(P){const k=P.k0*arrh(P.E,P.T,42.5),n=P.model==='jm'?P.nJM:1;
+ const al=t=>1-Math.exp(-Math.pow(k*t,n));
+ const a=al(P.tau),dt=P.tau*1e-3,rate=(al(P.tau)-al(P.tau-dt))/dt*100,t90=Math.pow(Math.log(10),1/n)/k;
+ const dg=[chk('T',P.T,40,45,'°C'),chk('pH',P.pH,1,1.6,''),chk('O₂',P.O2,2,8,'mg/L'),chk('Tiempo',P.tau,4,6,'d'),chk('Sólidos',P.sol,15,20,'%')];
+ if(P.O2<2)dg.push(D('e','O₂ < 2 mg/L: el documento base lo marca como insuficiente; la limitación por oxígeno NO está modelada (sin fuente cinética).'));
+ dg.push(D('w','Temperatura, pH, O₂ y % sólidos solo se evalúan como diagnóstico: las fuentes no dan ecuaciones para ellas. Monod no se implementa (sin constantes en las fuentes). T actúa vía Arrhenius con E hipotética.'));
+ if(a<.9)dg.push(D('w','Oxidación < 90 %: por debajo del rango de referencia (90–98 %); menor liberación de Au.'));
+ return{sets:[{label:'Oxidación de sulfuros (%)',c:'#d4a72c',data:curve(t=>al(t)*100,P.tau)},{label:'Au liberado (%)',c:'#4caf7a',d:[5,4],data:curve(t=>al(t)*P.enc,P.tau)}],xl:'Tiempo (días)',yl:'%',
+ out:[['Oxidación de sulfuros (%)',fmt(a*100)],['Sulfuro remanente (%)',fmt((1-a)*100)],['Au liberado (% del Au total)',fmt(a*P.enc)],['Velocidad final (%/día)',fmt(rate)],['Tiempo para 90 % (días)',fmt(t90)],['k efectivo (1/día)',fmt(k,3)]],
+ dg,v:{lib:a*P.enc/100}}}};
+M.m2={id:'m2',name:'2. Cianuración',
+inp:[['proc','Proceso',['cil|CIL','cip|CIP','ag|Lixiviación agitada','pil|Lixiviación en pilas']],['CN','NaCN libre',50,1000,10,300,'ppm'],['pH','pH',8,12,.1,10.5,''],['O2','O₂ disuelto',0,12,.1,8,'mg/L'],['P80','P80 (diámetro de la partícula auríferas, SUPUESTO)',10,300,5,75,'µm'],['sol','Sólidos',10,60,1,42,'%'],['t','Tiempo de lixiviación',1,2400,1,30,'h'],['T','Temperatura',5,45,1,22,'°C'],
+ ['dl','Espesor capa límite δ (rango 20–90 µm, Cap.5)',20,90,1,50,'µm'],['E','E aparente (HIPOTÉTICA; 0 = sin efecto)',0,60,1,0,'kJ/mol'],
+ ['model','Modelo seleccionado',['scm|SCM – control químico/capa límite (Ec. 3.15)','gb|SCM – difusión en capa producto GB (Ec. 4.23)','jan|Jander (Ec. 4.10)','fo|Primer orden (Ec. 5.12)']],
+ ['grade','Ley de cabeza',1,100,1,45,'g/t'],['avail','Au disponible (de Módulo 1)',0,100,1,100,'%']],
+pre:{cil:{t:30,sol:42},cip:{t:30,sol:42},ag:{t:36,sol:40},pil:{t:720,sol:42}},
+calc(P){const fr=1/(1+Math.pow(10,9.31-P.pH));         // fracción CN⁻ libre; pKa(HCN)=9,31 (Marsden & House 2006, NO de los PDF)
+ const cn=P.CN*fr/4.901e7,o2=P.O2/3.2e7,dl=P.dl*1e-4;   // mol/cm³
+ const kk=arrh(P.E,P.T,22),
+  R=(cn>0&&o2>0)?2*DO2*DCN*o2*cn/(dl*(DCN*cn+4*DO2*o2))*kk:0;   // mol Au/(cm²·s), Ec. 5.23 resuelta para R/A
+ const r0=P.P80*.5e-4,drdt=R*MW.Au/RHO_AU,tau=drdt>0?r0/drdt/3600:Infinity,t50=tau*(1-Math.pow(.5,1/3)); // h
+ const cap=P.proc==='pil'?.80:1,tf=P.t,g=G[P.model];
+ const kM=Object.fromEntries(Object.keys(G).map(m=>[m,t50>0&&isFinite(t50)?G[m](.5)/t50:0]));
+ const al=(m,t)=>Math.min(cap,ginv(G[m],kM[m]*t))*P.avail/100;
+ const reg=DCN*cn<4*DO2*o2?'limitada por CN⁻ (Ec. 5.24)':'limitada por O₂ (Ec. 5.25)';
+ const a=al(P.model,tf),dt=Math.max(tf*1e-3,1e-6),rate=(al(P.model,tf)-al(P.model,tf-dt))/dt*100,w=P.sol/100,ppm=P.grade*w/(1-w)*a;
+ const col={scm:'#d4a72c',gb:'#4caf7a',jan:'#5aa0e0',fo:'#e0554a'},nm={scm:'SCM Ec.3.15',gb:'GB Ec.4.23',jan:'Jander',fo:'1er orden'};
+ const sets=Object.keys(G).map(m=>({label:nm[m]+(m===P.model?' ◄':''),c:col[m],w:m===P.model?3:1.5,d:m===P.model?[]:[5,4],data:curve(t=>al(m,t)*100,tf)}));
+ const dg=[chk('NaCN libre',P.CN,200,500,'ppm'),chk('pH',P.pH,10,11,''),chk('O₂',P.O2,6,12,'mg/L'),chk('Temperatura',P.T,20,25,'°C')];
+ if(P.proc==='cil'||P.proc==='cip')dg.push(chk('Sólidos',P.sol,40,45,'%'),chk('Tiempo CIL/CIP',P.t,24,36,'h'));
+ if(P.pH<10)dg.push(D('e','⚠ ALERTA ACADÉMICA: pH < 10 → riesgo de formación de HCN (gas tóxico). El modelo reduce el CN⁻ libre según la especiación ácido–base.'));
+ dg.push(D('ok',`Régimen según relación de difusión: ${reg}. [CN⁻]/[O₂] molar = ${fmt(o2>0?cn/o2:NaN,1)} (el libro reporta ≈4,6–7,4 como transición).`));
+ if(P.proc==='pil')dg.push(D('w','Pilas: el documento base da recuperaciones típicas 60–80 %; se impone 80 % como techo (no es resultado del modelo).'));
+ if(!(R>0))dg.push(D('e','Rate nulo: [CN⁻] u O₂ es cero → disolución imposible en el modelo.'));
+ dg.push(D('w','Solo el modelo SCM tiene constantes con fuente (D_CN, D_O₂, δ). Los demás se normalizan al mismo t50 (misma conversión al 50 %) para comparar FORMA de curva; no son predicciones independientes. P80 se usa como diámetro de la partícula de Au (supuesto).'));
+ return{sets,xl:'Tiempo (h)',yl:'Recuperación de Au (%)',main:P.model,
+ out:[['Recuperación de Au (%)',fmt(a*100)],['Au disuelto en solución (mg/L, sin carbón)',fmt(ppm)],['Conversión α (modelo)',fmt(a/ (P.avail/100||1),3)],['Velocidad de disolución (%/h)',fmt(rate,3)],['Rate R/A (mol/cm²·s)',R.toExponential(2)],['Tiempo completo SCM (h)',fmt(tau,1)],['t50 (h)',fmt(t50,1)],['CN⁻ libre efectivo (ppm)',fmt(P.CN*fr,0)],['NaCN referencia doc. base (kg/t)','1,2 (no calculado)']],dg,v:{rec:a,ppm}}}};
+M.m3={id:'m3',name:'3. Adsorción en carbón',
+inp:[['circ','Circuito',['cip|CIP (Au ya disuelto)','cil|CIL (disolución simultánea)']],['C0','Au inicial/total en solución',1,200,.5,30,'mg/L'],['X','Carbón en pulpa',5,40,1,15,'g/L'],['t','Tiempo de residencia',1,48,1,24,'h'],
+ ['qm','q máx Langmuir (ref. 3–8 mg/g = 3000–8000 g/t)',1,12,.1,8,'mg/g'],['KL','K Langmuir (HIPOTÉTICA)',.01,5,.01,.5,'L/mg'],['Kf','K Freundlich (HIPOTÉTICA)',.1,20,.1,3,'(mg/g)(L/mg)^1/n'],['nF','n Freundlich (HIPOTÉTICA)',1,8,.1,3,''],
+ ['k','k transferencia de masa LDF (HIPOTÉTICA)',.01,3,.01,.5,'1/h'],['kd','k disolución CIL (HIPOTÉTICA)',.01,2,.01,.2,'1/h'],
+ ['model','Isoterma',['lang|Langmuir','freu|Freundlich']],['solv','Solver',['rk4|Runge–Kutta 4','euler|Euler']]],
+calc(P){const qe=(m,C)=>m==='lang'?P.qm*P.KL*C/(1+P.KL*C):P.Kf*Math.pow(Math.max(C,0),1/P.nF);
+ const run=m=>{const cil=P.circ==='cil';const y0=cil?[0,0,P.C0]:[P.C0,0,0];
+  return ode((t,y)=>{const dq=P.k*(qe(m,y[0])-y[1]),dS=cil?-P.kd*y[2]:0;return[(cil?-dS:0)-P.X*dq,dq,dS]},y0,P.t,300,P.solv)};
+ const A=run(P.model),B=run(P.model==='lang'?'freu':'lang'),e=A[A.length-1],eB=B[B.length-1];
+ const xy=(r,i,s=1)=>r.map(a=>({x:a[0],y:a[i]*s})),tot=P.C0,ads=P.X*e[2]/tot*100;
+ const dg=[chk('Carbón',P.X,10,25,'g/L'),chk('Carga final',e[2]*1000,3000,8000,'g Au/t C')];
+ if(e[2]>P.qm*1.001&&P.model==='lang')dg.push(D('e','Carga > q máx: inconsistencia del modelo.'));
+ if(e[2]*1000<3000)dg.push(D('w','Carga por debajo de 3000 g/t: es esperable con Au en solución muy diluido; no implica error.'));
+ dg.push(D('w','Constantes de isoterma y k son HIPOTÉTICAS (los PDF no las contienen). Resultados cualitativos, no experimentales. LDF: dq/dt = k(q_e(C) − q), balance C₀ = C + X·q (+ Au sin disolver en CIL).'));
+ dg.push(D(Math.abs(e[1]+P.X*e[2]+e[3]-tot)<1e-6*tot?'ok':'w',`Cierre de balance de Au en el modelo: ${fmt((e[1]+P.X*e[2]+e[3])/tot*100,3)} %.`));
+ return{sets:[{label:'C solución (mg/L) – '+P.model,c:'#d4a72c',data:xy(A,1),w:3},{label:'Carga carbón (g Au/t C)',c:'#4caf7a',y:'y2',data:xy(A,2,1000),w:3},{label:'C solución – otra isoterma',c:'#888',d:[5,4],data:xy(B,1)}],xl:'Tiempo (h)',yl:'Au en solución (mg/L)',y2l:'g Au/t carbón',
+ out:[['Adsorción (%)',fmt(ads)],['Au remanente en solución (mg/L)',fmt(e[1],3)],['Au sin disolver, CIL (mg/L eq.)',fmt(e[3],3)],['Carga en carbón (g Au/t)',fmt(e[2]*1000,0)],['Velocidad de adsorción final (mg/g·h)',fmt(P.k*(qe(P.model,e[1])-e[2]),4)],['Carga con otra isoterma (g/t)',fmt(eB[2]*1000,0)]],dg,v:{ads:ads/100,Cf:e[1]}}}};
+M.m4={id:'m4',name:'4. Merrill-Crowe',
+inp:[['C0','Au en solución rica',.5,500,.5,30,'mg/L'],['r','Relación Zn / estequiométrico (ref. doc.: 5–10×)',.2,15,.1,5,'×'],['T','Temperatura',10,60,1,25,'°C'],['k0','k cementación a 25 °C (HIPOTÉTICA)',.01,3,.01,.5,'1/min'],['E','E aparente (HIPOTÉTICA)',0,40,1,15,'kJ/mol'],['vac','Vacío (CONCEPTUAL, sin efecto en el cálculo)',0,100,1,85,'kPa'],['Pb','Pb²⁺ (ref. 0,01 g/L = 10 mg/L; CONCEPTUAL)',0,50,1,10,'mg/L'],['t','Tiempo',1,60,1,20,'min']],
+calc(P){const k=P.k0*arrh(P.E,P.T,25),cap=Math.min(1,P.r),eta=t=>cap*(1-Math.exp(-k*t)); // cementación controlada por difusión, 1er orden: Ec. 5.73
+ const zn_t=P.C0*MW.Zn/(2*MW.Au),e=eta(P.t),dg=[chk('Zn/estequiométrico',P.r,5,10,'×'),chk('Pb²⁺',P.Pb,10,10,'mg/L (≈0,01 g/L)')];
+ if(P.r<1)dg.push(D('e','Zn < estequiométrico: la precipitación completa es imposible (se aplica techo = relación).'));
+ dg.push(D('w','Estequiometría 2Au(CN)₂⁻ + Zn → 2Au + Zn(CN)₄²⁻ (Marsden & House 2006, no de los PDF) da 0,166 g Zn/g Au teórico; el exceso 5–10× y Pb provienen del documento base y NO modelan la velocidad. Vacío y Pb son variables conceptuales. k es hipotética: la fuente (Ec. 5.73) solo respalda la forma de primer orden.'));
+ return{sets:[{label:'Au residual (mg/L)',c:'#d4a72c',data:curve(t=>P.C0*(1-eta(t)),P.t),w:3},{label:'Con Zn = 1× estequiométrico',c:'#888',d:[5,4],data:curve(t=>P.C0*(1-Math.min(1,1)*(1-Math.exp(-k*t))),P.t)}],xl:'Tiempo (min)',yl:'Au residual (mg/L)',
+ out:[['Eficiencia de precipitación (%)',fmt(e*100)],['Au residual (mg/L)',fmt(P.C0*(1-e),3)],['Zn teórico (g/m³ solución)',fmt(zn_t,2)],['Zn estimado con relación (g/m³)',fmt(zn_t*P.r,2)],['Velocidad inicial (mg/L·min)',fmt(P.C0*cap*k,2)],['Au precipitado (g/m³)',fmt(P.C0*e,2)],['k efectivo (1/min)',fmt(k,3)]],dg,v:{eff:e,Cf:P.C0*(1-e)}}}};
+M.m5={id:'m5',name:'5. Destrucción de CN',
+inp:[['met','Método destacado',['inco|INCO (SO₂/aire)','h2o2|H₂O₂']],['C0','CN WAD inicial',10,500,5,300,'ppm'],['pH','pH',7,11,.1,9,''],['T','Temperatura',10,50,1,25,'°C'],['t','Tiempo de tratamiento',.1,6,.1,2,'h'],['kI','k INCO (CALIBRADA: 300→1 ppm en 2 h, doc.)',.1,8,.01,2.85,'1/h'],['kH','k H₂O₂ (HIPOTÉTICA)',.1,8,.01,1.5,'1/h'],['E','E aparente (HIPOTÉTICA; 0 = sin efecto)',0,80,1,0,'kJ/mol'],
+ ['rI','Relación SO₂/CN WAD (ref. 4–8)',0,12,.1,6,'g/g'],['rH','Relación H₂O₂/CN WAD (ref. 2–4)',0,8,.1,3,'g/g'],['Cu','Cu²⁺ catalizador (CONCEPTUAL)',0,100,1,25,'ppm'],['solv','Solver',['rk4|Runge–Kutta 4','euler|Euler']]],
+calc(P){const f=arrh(P.E,P.T,25),ks={inco:P.kI*f,h2o2:P.kH*f};
+ const run=m=>ode((t,y)=>[-ks[m]*y[0]],[P.C0],P.t,300,P.solv),xy=r=>r.map(a=>({x:a[0],y:a[1]}));
+ const a=run(P.met),c=a[a.length-1][1],k=ks[P.met],red=(1-c/P.C0)*100,ratio=P.met==='inco'?P.rI:P.rH;
+ const tt=x=>P.C0>x?fmt(Math.log(P.C0/x)/k,2):'0';
+ const dg=[];if(P.met==='inco'){dg.push(chk('pH',P.pH,8.5,9.5,''),chk('SO₂/CN WAD',P.rI,4,8,'g/g'),chk('Cu²⁺',P.Cu,10,50,'ppm'),chk('Tiempo',P.t,1,2,'h'));}
+ else{dg.push(chk('H₂O₂/CN WAD',P.rH,2,4,'g/g'),chk('pH',P.pH,8.5,9.5,''));dg.push(D('w','H₂O₂: el documento base solo da relación másica; no hay constante cinética en las fuentes (k hipotética).'));}
+ dg.push(c<1?D('ok','CN WAD final < 1 ppm: cumple el criterio más estricto del documento base.'):c<5?D('w','CN WAD entre 1 y 5 ppm: cumple solo el criterio de 5 ppm.'):D('e','CN WAD ≥ 5 ppm: no alcanza el criterio de referencia.'));
+ dg.push(D('w','Modelo: −dC/dt = kC (Ec. 2.4/2.16, primer orden empírico). Cu y pH no modifican la velocidad en el cálculo (sin fuente); T actúa solo con E hipotética. Consumos = relación × CN WAD removido: valores teóricos de referencia, no dosificación.'));
+ return{sets:[{label:'INCO',c:'#d4a72c',w:P.met==='inco'?3:1.5,data:xy(run('inco'))},{label:'H₂O₂',c:'#5aa0e0',w:P.met==='h2o2'?3:1.5,data:xy(run('h2o2'))},{label:'Límite 5 ppm',c:'#e0554a',d:[3,4],data:[{x:0,y:5},{x:P.t,y:5}]}],xl:'Tiempo (h)',yl:'CN WAD (ppm)',main:P.met==='inco'?0:1,
+ out:[['CN WAD final (ppm)',fmt(c,3)],['Reducción (%)',fmt(red,2)],['Velocidad inicial (ppm/h)',fmt(k*P.C0,1)],['Tiempo a 5 ppm (h)',tt(5)],['Tiempo a 1 ppm (h)',tt(1)],['Reactivo teórico (g/m³ solución)',fmt(ratio*(P.C0-c),0)]],dg,v:{Cf:c}}}};
+/* ============ INTERFAZ ============ */
+const $=s=>document.querySelector(s),mods=Object.values(M);
+const flow=$('#flow'),main=$('#main');
+mods.forEach((m,i)=>{flow.insertAdjacentHTML('beforeend',`<button class="node" data-t="${m.id}">${m.name}</button><span class="arr">→</span>`)});
+flow.insertAdjacentHTML('beforeend','<button class="node" data-t="int">🏭 Simulación integrada</button><button class="node" data-t="ref">📚 Referencias y modelos</button>');
+flow.onclick=e=>{const t=e.target.dataset.t;if(!t)return;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='tab-'+t));flow.querySelectorAll('.node').forEach(x=>x.classList.toggle('on',x.dataset.t===t));(M[t]&&M[t].ch)&&M[t].ch.resize()};
+const val=(m,id)=>$(`#n-${m.id}-${id}`);
+function getP(m){const P={};m.inp.forEach(s=>{const el=val(m,s[0]);if(Array.isArray(s[1]))P[s[0]]=el.value;else{let v=parseFloat(el.value);if(!isFinite(v))v=s[5];P[s[0]]=clamp(v,s[2],s[3])}});return P}
+function build(m){let h='';m.inp.forEach(s=>{const id=s[0];
+ if(Array.isArray(s[1]))h+=`<div class="row"><label>${s[0]==='model'||s[0]==='solv'||s[0]==='proc'||s[0]==='circ'||s[0]==='met'?'':''}${{proc:'Proceso',circ:'Circuito',met:'Método',model:'Modelo',solv:'Solver'}[id]}</label><select id="n-${m.id}-${id}">${s[1].map(o=>`<option value="${o.split('|')[0]}">${o.split('|')[1]}</option>`).join('')}</select></div>`;
+ else h+=`<div class="row"><label>${s[1]} [${s[6]}]</label><div class="c"><input type="range" id="r-${m.id}-${id}" min="${s[2]}" max="${s[3]}" step="${s[4]}" value="${s[5]}"><input type="number" id="n-${m.id}-${id}" min="${s[2]}" max="${s[3]}" step="${s[4]}" value="${s[5]}"></div></div>`});
+ $('#in-'+m.id).innerHTML=h;
+ m.inp.forEach(s=>{const el=val(m,s[0]);if(Array.isArray(s[1])){el.onchange=()=>{if(s[0]==='proc'&&m.pre){const p=m.pre[el.value];for(const k in p)setV(m,k,p[k])}run(m)}}else{const r=$(`#r-${m.id}-${s[0]}`);r.oninput=()=>{el.value=r.value;run(m)};el.oninput=()=>{const v=parseFloat(el.value);if(isFinite(v)){r.value=clamp(v,s[2],s[3]);run(m)}};el.onchange=()=>{el.value=clamp(parseFloat(el.value)||s[5],s[2],s[3]);r.value=el.value;run(m)}}})}
+function setV(m,id,v){val(m,id).value=v;const r=$(`#r-${m.id}-${id}`);if(r)r.value=v}
+function run(m,quiet){const P=getP(m),r=m.calc(P);m.last=r;m.P=P;
+ $('#out-'+m.id).innerHTML=r.out.map(o=>`<tr><td>${o[0]}</td><td>${o[1]}</td></tr>`).join('');
+ $('#dg-'+m.id).innerHTML=r.dg.map(d=>`<div class="dg ${d.l}">${{ok:'✔',w:'▲',e:'✖'}[d.l]} ${d.m}</div>`).join('');
+ const ds=r.sets.map(s=>({label:s.label,data:s.data,borderColor:s.c,borderDash:s.d||[],borderWidth:s.w||2,pointRadius:0,yAxisID:s.y||'y'}));
+ if(m.sc)ds.push({label:'Escenario A (guardado)',data:m.sc,borderColor:'#9a9a9a',borderDash:[2,3],pointRadius:0,borderWidth:2,yAxisID:'y'});
+ if(!m.ch){const ax=t=>({title:{display:true,text:t,color:'#ccc'},ticks:{color:'#aaa'},grid:{color:'#3a3328'}});
+  m.ch=new Chart($('#cv-'+m.id),{type:'line',data:{datasets:ds},options:{animation:false,responsive:true,maintainAspectRatio:false,parsing:false,plugins:{legend:{labels:{color:'#ddd'}}},scales:{x:{type:'linear',...ax('')},y:ax(''),y2:{position:'right',display:false,...ax('')}}}})}
+ else m.ch.data.datasets=ds;
+ const sc=m.ch.options.scales;sc.x.title.text=r.xl;sc.y.title.text=r.yl;sc.y2.display=!!r.y2l;sc.y2.title.text=r.y2l||'';m.ch.update();return r}
+function mainSet(m){const r=m.last;if(m.id==='m2')return r.sets.find(s=>s.label.includes('◄'));if(m.id==='m5')return r.sets[r.main];return r.sets[0]}
+mods.forEach(m=>{main.insertAdjacentHTML('beforeend',`<section class="tab" id="tab-${m.id}"><div class="grid"><div><div class="card"><h3>${m.name} — variables</h3><div id="in-${m.id}"></div>
+<button data-a="reset">Restablecer referencia</button><button class="s" data-a="save">Guardar escenario A</button><button class="s" data-a="clr">Borrar escenario</button></div></div>
+<div><div class="card"><h3>Gráfica</h3><div class="cv"><canvas id="cv-${m.id}"></canvas></div></div><div class="card"><h3>Resultados</h3><table class="out" id="out-${m.id}"></table></div><div class="card"><h3>Diagnóstico operativo (académico)</h3><div id="dg-${m.id}"></div></div></div></div></section>`);
+ build(m);const t=$('#tab-'+m.id);
+ t.querySelector('[data-a=reset]').onclick=()=>{m.inp.forEach(s=>Array.isArray(s[1])?val(m,s[0]).selectedIndex=0:setV(m,s[0],s[5]));run(m)};
+ t.querySelector('[data-a=save]').onclick=()=>{m.sc=mainSet(m).data.slice();run(m)};t.querySelector('[data-a=clr]').onclick=()=>{m.sc=null;run(m)}});
+/* ---- Simulación integrada: M1 → M2 → M3 → M4 (balance de Au en g/h) ---- */
+main.insertAdjacentHTML('beforeend',`<section class="tab" id="tab-int"><div class="card"><h3>Simulación integrada de planta (base: documento “cianuración del oro 2”)</h3>
+<div class="row"><label>Alimentación de sólidos [t/h] (doc: 10)</label><input type="number" id="f-F" value="10" min="0.1" step="0.1"></div>
+<div class="row"><label>Ley de cabeza [g/t] (doc: 40–45)</label><input type="number" id="f-g" value="45" min="0.1" step="0.5"></div>
+<div class="row"><label>Agua de proceso [m³/h] (doc: 15)</label><input type="number" id="f-w" value="15" min="0.1" step="0.5"></div>
+<button id="bint">Ejecutar simulación integrada</button><p class="note">Usa los parámetros actuales de cada pestaña. M1 libera Au en proporción a la oxidación (supuesto). M2 disuelve; M3 (modo CIP) adsorbe sobre el Au en solución; el remanente pasa a M4 como ruta conceptual. Cierre = por construcción del reparto; verifica conservación aritmética. CN WAD del M5 se ingresa en su pestaña (el documento base no da flujo de CN de salida del CIL consistente con la pulpa).</p></div>
+<div class="card"><h3>Balance de Au (g/h)</h3><table id="bal"></table></div><div class="card"><h3>Diagnóstico</h3><div id="dg-int"></div></div></section>`);
+$('#bint').onclick=()=>{const F=+$('#f-F').value,g=+$('#f-g').value,w=+$('#f-w').value;
+ if(!(F>0&&g>0&&w>0)){$('#dg-int').innerHTML='<div class="dg e">✖ Entradas inválidas (deben ser > 0).</div>';return}
+ const P1=getP(M.m1),r1=M.m1.calc(P1),L=r1.v.lib;
+ const P2=getP(M.m2);P2.avail=L*100;const r2=M.m2.calc(P2);
+ const feed=F*g,lib=feed*L,dis=feed*r2.v.rec/ (L>0?1:1),ppm=dis/w;   // r2.v.rec ya incluye avail
+ const P3=getP(M.m3);P3.circ='cip';P3.C0=Math.max(ppm,1e-9);const r3=M.m3.calc({...P3,C0:Math.max(ppm,1)});
+ const adsF=r3.v.ads,ads=dis*adsF,rem=dis-ads;
+ const P4=getP(M.m4);const eff=M.m4.calc({...P4,C0:Math.max(rem/w,.5)}).v.eff,cem=rem*eff,res=rem-cem;
+ const tUn=feed-lib,tUd=lib-dis,out=tUn+tUd+ads+cem+res,rows=[['Oro alimentado',feed],['Au NO liberado en biooxidación (a relaves)',tUn],['Au liberado',lib],['Au liberado sin disolver (a relaves)',tUd],['Au disuelto',dis],['Au adsorbido en carbón',ads],['Au recuperado por cementación',cem],['Au residual en solución',res]];
+ $('#bal').innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td>${fmt(r[1],2)}</td><td>${fmt(r[1]/feed*100,2)} %</td></tr>`).join('')+`<tr><th>Salidas totales</th><th>${fmt(out,2)}</th><th>Diferencia: ${fmt(feed-out,6)} g/h</th></tr><tr><th>Cierre del balance</th><th colspan=2>${fmt(out/feed*100,4)} %</th></tr><tr><td>Recuperación global (carbón + cementación)</td><td>${fmt(ads+cem,2)}</td><td>${fmt((ads+cem)/feed*100,2)} %</td></tr>`;
+ $('#dg-int').innerHTML=`<div class="dg ${Math.abs(feed-out)<1e-6?'ok':'e'}">${Math.abs(feed-out)<1e-6?'✔ Balance cerrado':'✖ Balance no cierra'}</div><div class="dg w">▲ Au disuelto equivale a ${fmt(ppm,2)} mg/L en la fase acuosa; en M3 se usa C₀ = max(valor, 1 mg/L) solo por rango del control. Escenario académico, no predicción industrial.</div>${r1.dg.concat(r2.dg).filter(d=>d.l!=='ok').slice(0,4).map(d=>`<div class="dg ${d.l}">${d.l==='e'?'✖':'▲'} ${d.m}</div>`).join('')}`};
+/* ---- Referencias ---- */
+main.insertAdjacentHTML('beforeend',`<section class="tab" id="tab-ref"><div class="card"><h3>Modelos, fuentes y datos faltantes</h3><table>
+<tr><th>Módulo</th><th>Modelo / ecuación</th><th>Fuente</th><th>Limitaciones / faltantes</th></tr>
+<tr><td>1</td><td>−ln(1−α)=kt; [−ln(1−α)]^(1/n)=k′t; Arrhenius k=A·exp(−E/RT)</td><td>Ray & Ray 2018, Ec. 1.6, 2.16, 2.39</td><td>No hay k, E ni n de biooxidación en las fuentes (hipotéticos). Monod no implementado. Efecto de pH, O₂ y % sólidos solo diagnóstico.</td></tr>
+<tr><td>2</td><td>R/A = 2·D_O₂·D_CN·[O₂][CN]/(δ(D_CN[CN]+4D_O₂[O₂])); 1−(1−α)^(1/3)=kt; GB; Jander; 1er orden</td><td>Cap. 5 Ec. 5.23 (Wadsworth & Wadia 1955); D_CN=1,83e-5 y D_O₂=2,76e-5 cm²/s; δ=20–90 µm; Cap. 3 Ec. 3.15; Cap. 4 Ec. 4.10, 4.23; Cap. 5 Ec. 5.12</td><td>El rate usa constantes con fuente; los otros modelos se normalizan al mismo t50. Diámetro de Au = P80 (supuesto). Especiación HCN (pKa 9,31) de Marsden & House 2006. Elsner se usa solo como estequiometría, no como cinética.</td></tr>
+<tr><td>3</td><td>Langmuir, Freundlich, LDF dq/dt=k(q_e−q), balance de masa C₀=C+Xq</td><td>Forma cinética: Cap. 2 (Ec. 2.4); valores de carga y carbón: doc. base</td><td>Los PDF no contienen constantes de isoterma ni de transferencia de masa: todas hipotéticas.</td></tr>
+<tr><td>4</td><td>Primer orden por difusión en capa límite (cementación); estequiometría Zn:Au</td><td>Cap. 5 Ec. 5.73 (Wadsworth 1969; Ingraham 1969); doc. base: Zn 5–10×, Pb²⁺ ≈ 0,01 g/L</td><td>k y E hipotéticas. Vacío y Pb conceptuales (sin efecto cinético). El 5–10× y el Pb son referencias del documento, no instrucciones.</td></tr>
+<tr><td>5</td><td>−dC/dt=kC (Euler/RK4)</td><td>Cap. 2 Ec. 2.4; doc. base (INCO: pH 8,5–9,5; 4–8 g SO₂/g; Cu 10–50 ppm; 1–2 h; H₂O₂ 2–4 g/g)</td><td>k INCO calibrada con el criterio del documento (300→1 ppm en 2 h); k H₂O₂ hipotética.</td></tr></table></div>
+<div class="card"><h3>Referencias</h3><p class="note">Ray, H.S. & Ray, S. (2018). Kinetics of Metallurgical Processes. Springer (caps. 1–6). · Documento base: «Desarrollo de un simulador para el procesamiento del oro mediante cianuración» (cianuración del oro 2). · Marsden, J. & House, C. (2006). The Chemistry of Gold Extraction. SME. · Wadsworth, M.E. & Wadia, D.R. (1955). Trans. TMS-AIME 203, 755 (vía Cap. 5). · Servicio Geológico Colombiano & MinEnergía (2018). Guía metodológica para el mejoramiento productivo del beneficio de oro sin el uso de mercurio. · Valarezo Tenesaca et al. (2024). Ciencia Latina 8(3).</p>
+<p class="note tag">Código de colores: rótulos «HIPOTÉTICA/SUPUESTO/CONCEPTUAL» indican valores sin respaldo en las fuentes.</p></div></section>`);
+mods.forEach(m=>run(m));flow.querySelector('[data-t=m2]').click();
+</script></body></html>
